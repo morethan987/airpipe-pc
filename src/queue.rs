@@ -4,7 +4,7 @@
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
@@ -20,6 +20,9 @@ pub enum Item {
 #[derive(Default)]
 pub struct OutQueue {
     items: Mutex<VecDeque<Item>>,
+    /// Woken on every push/requeue so an idle pump picks items up at once
+    /// (a pump that drained to empty sleeps on this instead of exiting).
+    cv: Condvar,
 }
 
 impl OutQueue {
@@ -30,34 +33,44 @@ impl OutQueue {
     /// Clipboard entries merge: only the newest survives (clipboard
     /// semantics, §8 — repeated text syncs keep just the latest).
     pub fn push_clip(&self, image: bool, mime: String, data: Vec<u8>) {
-        let mut q = self.items.lock().unwrap();
-        q.retain(|i| !matches!(i, Item::Clip { .. }));
-        q.push_back(Item::Clip { image, mime, data });
+        {
+            let mut q = self.items.lock().unwrap();
+            q.retain(|i| !matches!(i, Item::Clip { .. }));
+            q.push_back(Item::Clip { image, mime, data });
+        }
+        self.cv.notify_all();
     }
 
     /// FIFO append; paths already queued are dropped (dedup across items).
     pub fn push_files(&self, paths: Vec<PathBuf>) {
-        let mut q = self.items.lock().unwrap();
-        let mut existing: Vec<PathBuf> = q
-            .iter()
-            .flat_map(|i| match i {
-                Item::Files(ps) => ps.clone(),
-                _ => Vec::new(),
-            })
-            .collect();
-        let fresh: Vec<PathBuf> = paths
-            .into_iter()
-            .filter(|p| {
-                if existing.contains(p) {
-                    false
-                } else {
-                    existing.push(p.clone());
-                    true
-                }
-            })
-            .collect();
-        if !fresh.is_empty() {
-            q.push_back(Item::Files(fresh));
+        let mut pushed = false;
+        {
+            let mut q = self.items.lock().unwrap();
+            let mut existing: Vec<PathBuf> = q
+                .iter()
+                .flat_map(|i| match i {
+                    Item::Files(ps) => ps.clone(),
+                    _ => Vec::new(),
+                })
+                .collect();
+            let fresh: Vec<PathBuf> = paths
+                .into_iter()
+                .filter(|p| {
+                    if existing.contains(p) {
+                        false
+                    } else {
+                        existing.push(p.clone());
+                        true
+                    }
+                })
+                .collect();
+            if !fresh.is_empty() {
+                q.push_back(Item::Files(fresh));
+                pushed = true;
+            }
+        }
+        if pushed {
+            self.cv.notify_all();
         }
     }
 
@@ -69,10 +82,26 @@ impl OutQueue {
 
     /// Put items back (front, in order) after a send failure.
     pub fn requeue_front(&self, mut items: Vec<Item>) {
+        {
+            let mut q = self.items.lock().unwrap();
+            items.reverse();
+            for it in items {
+                q.push_front(it);
+            }
+        }
+        self.cv.notify_all();
+    }
+
+    /// Block until an item arrives or `until` passes (idle pump wait).
+    pub fn wait_until(&self, until: std::time::Instant) {
         let mut q = self.items.lock().unwrap();
-        items.reverse();
-        for it in items {
-            q.push_front(it);
+        while q.is_empty() {
+            let now = std::time::Instant::now();
+            if now >= until {
+                return;
+            }
+            let (g, _) = self.cv.wait_timeout(q, until - now).unwrap();
+            q = g;
         }
     }
 

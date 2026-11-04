@@ -169,7 +169,11 @@ impl Conn {
             if now >= deadline || !self.alive.load(Ordering::Relaxed) {
                 return None;
             }
-            let (g, _) = self.results_cv.wait_timeout(r, deadline - now).unwrap();
+            // Slice the wait so a dead link (alive=false, nobody notifying
+            // this cv) wakes us within a second instead of sleeping out the
+            // whole 600 s holding the item in flight.
+            let slice = (deadline - now).min(Duration::from_secs(1));
+            let (g, _) = self.results_cv.wait_timeout(r, slice).unwrap();
             r = g;
         }
     }
@@ -990,20 +994,36 @@ fn spawn_pump_if_idle(shared: Arc<Shared>, conn: Arc<Conn>) {
         .spawn(move || {
             pump(&shared, &conn);
             shared.pump_running.store(false, Ordering::SeqCst);
-            // the queue may have grown while we were finishing
-            if !shared.queue.is_empty() && conn.alive.load(Ordering::Relaxed) {
-                shared.pump_running.store(true, Ordering::SeqCst);
-                pump(&shared, &conn);
-                shared.pump_running.store(false, Ordering::SeqCst);
+            // The session may have been replaced while we pumped; hand the
+            // queue over to the current session's pump if items are waiting.
+            if !shared.queue.is_empty() {
+                let cur = {
+                    let g = shared.session.lock().unwrap();
+                    g.as_ref().map(|s| s.conn.clone())
+                };
+                if let Some(cur_conn) = cur {
+                    if !Arc::ptr_eq(&cur_conn, &conn) && cur_conn.alive.load(Ordering::Relaxed) {
+                        spawn_pump_if_idle(shared, cur_conn);
+                    }
+                }
             }
         });
 }
 
 fn pump(shared: &Arc<Shared>, conn: &Arc<Conn>) {
     loop {
+        if !conn.alive.load(Ordering::Relaxed) {
+            return;
+        }
         let items = shared.queue.drain();
         if items.is_empty() {
-            return;
+            // Idle: sleep until new items arrive (pushed queues notify) or
+            // the connection dies — the 1 s bound makes the alive check
+            // timely without a dedicated wake on disconnect.
+            shared
+                .queue
+                .wait_until(Instant::now() + Duration::from_secs(1));
+            continue;
         }
         let mut failed: Vec<Item> = Vec::new();
         for item in items {
@@ -1040,7 +1060,9 @@ fn pump(shared: &Arc<Shared>, conn: &Arc<Conn>) {
         }
         if !failed.is_empty() {
             shared.queue.requeue_front(failed);
-            return;
+            // A failed send usually means the link is gone; back off and
+            // let the alive check end us once reader_loop notices.
+            std::thread::sleep(Duration::from_secs(1));
         }
     }
 }
@@ -1202,6 +1224,7 @@ fn on_selection(shared: &Arc<Shared>, mimes: Vec<String>) {
     if mimes.is_empty() {
         return;
     }
+    alog!(Debug, "clipboard event: {mimes:?}");
     let kind = classify::classify(&mimes);
     let clip = match shared.clip.as_ref() {
         Some(c) => c,
@@ -1275,8 +1298,16 @@ fn on_selection(shared: &Arc<Shared>, mimes: Vec<String>) {
             if !cc.auto_text {
                 return;
             }
-            let Ok(Some(bytes)) = clip.read(&mime) else {
-                return;
+            let bytes = match clip.read(&mime) {
+                Ok(Some(b)) => b,
+                Ok(None) => {
+                    alog!(Debug, "clipboard: text offer gone, skipped");
+                    return;
+                }
+                Err(e) => {
+                    alog!(Debug, "clipboard: text read failed: {e}");
+                    return;
+                }
             };
             if shared
                 .echo
@@ -1286,6 +1317,11 @@ fn on_selection(shared: &Arc<Shared>, mimes: Vec<String>) {
             {
                 return;
             }
+            alog!(
+                Info,
+                "clipboard → phone: text ({})",
+                human_size(bytes.len() as u64)
+            );
             shared.queue.push_clip(false, mime, bytes);
         }
         classify::SelectionKind::Passthrough { mimes } => {
