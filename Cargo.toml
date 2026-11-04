@@ -1,0 +1,22 @@
+[package]
+name = "airpipe-pc"
+version = "0.1.0"
+edition = "2024"
+description = "Airpipe PC daemon and CLI (LAN clipboard/file transfer)"
+
+[[bin]]
+name = "ap"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std"] }
+rustls-pki-types = { version = "1", features = ["std"] }
+rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
+sha2 = "0.10"
+lamco-data-control = "1.0"
+ksni = "0.2"
+notify-rust = "4"
