@@ -88,8 +88,13 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// send files/dirs (`-` = stdin)
-    Send { paths: Vec<String> },
+    /// send files/dirs (`-` = stdin); `--clipboard` sends the files copied
+    /// in the clipboard (tray equivalent)
+    Send {
+        paths: Vec<String>,
+        #[arg(short, long)]
+        clipboard: bool,
+    },
     /// push text to the phone (reads stdin without an argument)
     Text { text: Option<String> },
     /// follow daemon logs (journalctl)
@@ -138,7 +143,7 @@ fn main() -> ExitCode {
         Some(Cmd::Pair { timeout }) => cmd_pair(timeout),
         Some(Cmd::Devices) => cmd_devices(),
         Some(Cmd::Unpair { name, all }) => cmd_unpair(name, all),
-        Some(Cmd::Send { paths }) => cmd_send(&paths),
+        Some(Cmd::Send { paths, clipboard }) => cmd_send(&paths, clipboard),
         Some(Cmd::Text { text }) => cmd_text(text),
         Some(Cmd::Log { follow }) => cmd_log(follow),
         Some(Cmd::Stop) => cmd_stop(),
@@ -302,9 +307,33 @@ fn cmd_unpair(name: Option<String>, all: bool) -> u8 {
     }
 }
 
-fn cmd_send(paths: &[String]) -> u8 {
+fn cmd_send(paths: &[String], clipboard: bool) -> u8 {
+    if clipboard {
+        if !paths.is_empty() {
+            eprintln!("ap: --clipboard 不能与路径参数同时使用");
+            return 1;
+        }
+        let Ok(mut c) = ipc() else { return 2 };
+        return match c.request(serde_json::json!({"cmd": "send_clip_files"})) {
+            Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => {
+                println!(
+                    "已入队 {} 个剪贴板文件（手机上线后自动发送）",
+                    v["queued"].as_u64().unwrap_or(0)
+                );
+                0
+            }
+            Ok(v) => {
+                eprintln!("ap: {}", v.get("error").cloned().unwrap_or_default());
+                1
+            }
+            Err(e) => {
+                eprintln!("ap: {e}");
+                1
+            }
+        };
+    }
     if paths.is_empty() {
-        eprintln!("ap: ap send <路径...>（`-` = stdin）");
+        eprintln!("ap: ap send <路径...>（`-` = stdin；`-c/--clipboard` = 发送剪贴板复制的文件）");
         return 1;
     }
     let Ok(mut c) = ipc() else { return 2 };
@@ -415,7 +444,7 @@ fn cmd_config(edit: bool) -> u8 {
             }
             let _ = std::fs::write(
                 &path,
-                "# airpipe 配置 — 所有字段可省略\nport = 17580\nrecv_dir = \"~/Airpipe\"\n\n[clipboard]\nauto_text = true\nauto_image = true\nmax_image_mb = 20\n",
+                "# airpipe 配置 — 所有字段可省略\nport = 17580\nrecv_dir = \"~/Airpipe\"\n\n[clipboard]\nauto_text = true       # 文本自动同步\nauto_image = false     # 剪贴板图片内容自动推送手机（截图/复制的图像）；复制文件不受影响\nmax_image_mb = 20      # 超限跳过并记日志\n",
             );
         }
         match std::process::Command::new(editor).arg(&path).status() {
@@ -441,6 +470,9 @@ fn cmd_config(edit: bool) -> u8 {
     println!(
         "clipboard   auto_text={} auto_image={} max_image_mb={}",
         cfg.clipboard.auto_text, cfg.clipboard.auto_image, cfg.clipboard.max_image_mb
+    );
+    println!(
+        "            （auto_image=剪贴板里的图片内容自动推送手机；复制文件永不自动发送，需托盘或 ap send -c）"
     );
     println!("身份/状态   {}", config::display(&config::state_dir()));
     0

@@ -17,7 +17,7 @@
 | `ap pair` | `[--timeout S]` | 开配对窗口（默认 60s），打印 6 位码并倒计时，等手机接入；结果即退出码 |
 | `ap devices` | | 列出已配对设备（名称 / 指纹 / 最近 IP / 最近在线） |
 | `ap unpair` | `<设备名> \| --all` | 删除配对记录 |
-| `ap send` | `<路径...>` | 发送文件 / 目录（目录递归，保留结构）。**`-` = stdin**（命名 `stdin-<时间戳>.bin`）。掉线则入队待手机上线 |
+| `ap send` | `<路径...> \|\| -c/--clipboard \|\| -` | 发送文件 / 目录（目录递归，保留顶层目录名结构；**单文件一律只落文件名**，不带父目录）。**`-c` = 发送剪贴板复制的文件**（等同托盘）；**`-` = stdin**（命名 `stdin-<时间戳>.bin`）。掉线则入队待手机上线 |
 | `ap text` | `[<字符串>]` | 无参数时读 stdin。文本直推手机剪贴板（不经过 PC 本机剪贴板） |
 | `ap log` | `[-f/--follow]` | 跟随 daemon 日志；systemd 下即 `journalctl --user -u airpipe -f` |
 | `ap stop` | | 优雅停机（清 runtime socket，BYE 手机） |
@@ -33,7 +33,7 @@ echo "手机上看这句"        | ap text          # 文本推送
 wl-paste                 | ap text          # 把当前剪贴板显式再推一次
 ```
 
-`ap send` 多路径混合文件与目录；任一路径不可读 → 整体报错不入队（fail fast），已入队部分不回滚。
+`ap send` 多路径混合文件与目录；任一路径不可读 → 整体报错不入队（fail fast），已入队部分不回滚。顶层命名只取参数自身的文件名 / 目录名：`ap send /home/x/Airpipe/from_phone/test.pdf` 到手机即 `test.pdf`；同名文件在接收端自动追加 ` (1)` 不覆盖。
 
 ## 配置
 
@@ -46,7 +46,7 @@ recv_dir = "~/Airpipe"  # 手机→PC 文件落盘根（from_phone/ 子目录）
 
 [clipboard]
 auto_text = true        # 文本自动同步
-auto_image = true       # 图片自动同步
+auto_image = false      # 剪贴板图片内容（截图/复制的图像）自动推送手机；复制文件不受影响
 max_image_mb = 20       # 超限跳过并记日志
 ```
 
@@ -60,7 +60,7 @@ max_image_mb = 20       # 超限跳过并记日志
 ```
 📡 Airpipe — 已连接 mi-13p        ← 状态行（离线/配对窗口中 同理）
 ────────────────────
-发送剪贴板文件            ← 读当前剪贴板文件引用并入队（文件管理器复制后点这里）
+发送剪贴板文件            ← 读当前剪贴板文件引用并入队（文件管理器复制后点这里；等价 `ap send -c`）
 配对新设备                ← 等价 ap pair，6 位码以桌面通知弹出
 打开收件目录              ← xdg-open ~/Airpipe/from_phone
 ────────────────────
@@ -100,3 +100,4 @@ src/
 ## 变更日志
 
 - 2026-11-04 v1 初稿（审议中）
+- 2026-11-04 v1.1：`ap send` 顶层命名只取参数自身文件名/目录名（单文件不再带父目录）；新增 `ap send -c/--clipboard`（等同托盘「发送剪贴板文件」）；`auto_image` 默认 false 并在 `ap config` 输出中释义。

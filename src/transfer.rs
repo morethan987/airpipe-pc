@@ -54,7 +54,7 @@ pub fn unique_path(path: &Path) -> PathBuf {
 }
 
 /// One planned outbound entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SendEntry {
     /// Empty directory skeleton entry (B frame with BF_DIR).
     Dir { rel: String },
@@ -67,11 +67,11 @@ pub enum SendEntry {
 }
 
 /// Expand user-supplied paths into a deterministic, sorted send plan.
-/// rel paths preserve the top-level name (relative args keep their form;
-/// absolute args are made relative to cwd when possible, else file_name).
+/// Top-level names only: a file arg lands at the receive root as its own
+/// file name; a dir arg keeps its own top dir name and recurses inside.
+/// Never cwd-relative — a copied file must not drag its parent dirs along.
 pub fn plan(paths: &[PathBuf]) -> std::io::Result<Vec<SendEntry>> {
     let mut out = Vec::new();
-    let cwd = std::env::current_dir().ok();
     for p in paths {
         let meta = std::fs::metadata(p)
             .map_err(|e| std::io::Error::other(format!("{}: {e}", p.display())))?;
@@ -81,7 +81,7 @@ pub fn plan(paths: &[PathBuf]) -> std::io::Result<Vec<SendEntry>> {
                 p.display()
             )));
         }
-        let top_rel = rel_of(p, cwd.as_deref());
+        let top_rel = top_name(p)?;
         if meta.is_dir() {
             walk_dir(p, &top_rel, &mut out)?;
         } else {
@@ -95,19 +95,18 @@ pub fn plan(paths: &[PathBuf]) -> std::io::Result<Vec<SendEntry>> {
     Ok(out)
 }
 
-fn rel_of(p: &Path, cwd: Option<&Path>) -> String {
-    let rel: PathBuf = if p.is_absolute() {
-        match cwd.and_then(|c| p.strip_prefix(c).ok()) {
-            Some(r) => r.to_path_buf(),
-            None => p
-                .file_name()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| p.to_path_buf()),
-        }
-    } else {
-        p.components().collect()
-    };
-    sanitize_rel(&rel.to_string_lossy())
+/// The top-level rel name is always the argument's own file name —
+/// `/home/x/Airpipe/from_phone/test.pdf` sends as just `test.pdf`, and
+/// `/home/x/Airpipe/from_phone` sends as `from_phone/...`.
+fn top_name(p: &Path) -> std::io::Result<String> {
+    let name = sanitize_rel(&p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
+    if name.is_empty() {
+        return Err(std::io::Error::other(format!(
+            "{}: no usable file name",
+            p.display()
+        )));
+    }
+    Ok(name)
 }
 
 fn walk_dir(dir: &Path, top_rel: &str, out: &mut Vec<SendEntry>) -> std::io::Result<()> {
@@ -354,6 +353,50 @@ mod tests {
                 ("d/sub/c.txt".into(), false),
             ]
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn plan_uses_top_level_names_only() {
+        let dir = std::env::temp_dir().join(format!("airpipe-top-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Airpipe/from_phone")).unwrap();
+        std::fs::write(dir.join("Airpipe/from_phone/test.pdf"), b"pdf").unwrap();
+        std::fs::write(dir.join("loose.txt"), b"t").unwrap();
+
+        // absolute file arg → basename only, regardless of daemon cwd
+        let file = dir.join("Airpipe/from_phone/test.pdf");
+        let entries = plan(&[file.clone()]).unwrap();
+        assert_eq!(
+            entries,
+            vec![SendEntry::File {
+                abs: file,
+                rel: "test.pdf".into(),
+                size: 3,
+            }]
+        );
+
+        // absolute dir arg → its own top dir name, structure inside
+        let d = dir.join("Airpipe/from_phone");
+        let entries = plan(&[d]).unwrap();
+        let rels: Vec<String> = entries
+            .into_iter()
+            .map(|e| match e {
+                SendEntry::Dir { rel } => rel,
+                SendEntry::File { rel, .. } => rel,
+            })
+            .collect();
+        assert_eq!(rels, vec!["from_phone".to_string(), "from_phone/test.pdf".to_string()]);
+
+        // relative arg with directories in it → still basename only
+        let old = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let entries = plan(&[PathBuf::from("Airpipe/from_phone/test.pdf")]).unwrap();
+        std::env::set_current_dir(old).unwrap();
+        assert!(matches!(&entries[0], SendEntry::File { rel, .. } if rel == "test.pdf"));
+
+        // args without a usable file name fail fast
+        assert!(plan(&[dir.join("..")]).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

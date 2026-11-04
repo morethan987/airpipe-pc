@@ -15,7 +15,9 @@ impl Default for ClipboardCfg {
     fn default() -> Self {
         Self {
             auto_text: true,
-            auto_image: true,
+            // off by default: pushing a copied screenshot/image to the
+            // phone unprompted is surprising; opt in via config
+            auto_image: false,
             max_image_mb: 20,
         }
     }
