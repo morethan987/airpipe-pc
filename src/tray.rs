@@ -1,5 +1,5 @@
-//! System tray (ksni / StatusNotifierItem). Icon is a generated 32x32 ARGB32
-//! placeholder pixmap until a proper icon lands.
+//! System tray (ksni / StatusNotifierItem). Icon pixmaps are baked from
+//! assets/tray_icon.png by build.rs into ARGB32 (network byte order).
 
 use ksni::blocking::TrayMethods;
 use ksni::menu::StandardItem;
@@ -12,28 +12,21 @@ pub struct AirTray {
     pub shared: Arc<Shared>,
 }
 
-/// 32x32 ARGB32 (network byte order) placeholder: blue circle on dark slate.
-fn placeholder_icon() -> ksni::Icon {
-    const W: i32 = 32;
-    const H: i32 = 32;
-    let mut data = Vec::with_capacity((W * H * 4) as usize);
-    for y in 0..H {
-        for x in 0..W {
-            let dx = x - 16;
-            let dy = y - 16;
-            let inside = dx * dx + dy * dy <= 81;
-            let (r, g, b) = if inside {
-                (0x2d, 0x96, 0xcf)
-            } else {
-                (0x1e, 0x1e, 0x28)
-            };
-            data.extend_from_slice(&[0xff, r, g, b]);
-        }
-    }
+/// 32x32 ARGB32 (network byte order) pixmap baked from assets/tray_icon.png.
+fn icon_32() -> ksni::Icon {
     ksni::Icon {
-        width: W,
-        height: H,
-        data,
+        width: 32,
+        height: 32,
+        data: include_bytes!(concat!(env!("OUT_DIR"), "/tray_icon_32.argb")).to_vec(),
+    }
+}
+
+/// 64x64 ARGB32 (network byte order) pixmap baked from assets/tray_icon.png.
+fn icon_64() -> ksni::Icon {
+    ksni::Icon {
+        width: 64,
+        height: 64,
+        data: include_bytes!(concat!(env!("OUT_DIR"), "/tray_icon_64.argb")).to_vec(),
     }
 }
 
@@ -45,7 +38,7 @@ impl Tray for AirTray {
         "Airpipe".into()
     }
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        vec![placeholder_icon()]
+        vec![icon_32(), icon_64()]
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {

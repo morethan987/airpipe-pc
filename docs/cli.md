@@ -55,7 +55,7 @@ max_image_mb = 20       # 超限跳过并记日志
 
 ## 系统托盘（随 daemon 常驻）
 
-图标：占位 emoji（正式图标未定）。菜单：
+图标：项目 logo（build.rs 自 assets/tray_icon.png 烘焙 32/64 px 点阵）。菜单：
 
 ```
 📡 Airpipe — 已连接 mi-13p        ← 状态行（离线/配对窗口中 同理）
