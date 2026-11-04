@@ -1,0 +1,102 @@
+# Airpipe PC 端 CLI 接口
+
+**版本 v1（草案，待实现校准）** · 帧语义见根仓库 `docs/protocol.md`；本文只管人机接口。实现变动须同步更新本文并记入文末。
+
+## 总则
+
+- 二进制名 `ap`。**无子命令运行 = `ap status`** 并附一行提示。
+- 除 `ap daemon` / `ap pair` 外，所有命令经 Unix 套接字与运行中的 daemon 通信；daemon 不在 → 报错退出码 `2` 并提示先 `ap daemon`。
+- 退出码：`0` 成功；`1` 业务错误；`2` daemon 未运行；`130` Ctrl-C。
+
+## 子命令
+
+| 命令 | 形式 | 说明 |
+| :--- | :--- | :--- |
+| `ap daemon` | `[--port N] [--no-tray] [-v/--verbose]` | 启动守护进程，**前台阻塞**；自启动交给 systemd（根 README 有 unit 文件）。`--no-tray` 调试用 |
+| `ap status` | | daemon 状态：运行时长 / 手机连接 / 队列深度 / 已配对设备 / 收件目录 / 端口 |
+| `ap pair` | `[--timeout S]` | 开配对窗口（默认 60s），打印 6 位码并倒计时，等手机接入；结果即退出码 |
+| `ap devices` | | 列出已配对设备（名称 / 指纹 / 最近 IP / 最近在线） |
+| `ap unpair` | `<设备名> \| --all` | 删除配对记录 |
+| `ap send` | `<路径...>` | 发送文件 / 目录（目录递归，保留结构）。**`-` = stdin**（命名 `stdin-<时间戳>.bin`）。掉线则入队待手机上线 |
+| `ap text` | `[<字符串>]` | 无参数时读 stdin。文本直推手机剪贴板（不经过 PC 本机剪贴板） |
+| `ap log` | `[-f/--follow]` | 跟随 daemon 日志；systemd 下即 `journalctl --user -u airpipe -f` |
+| `ap stop` | | 优雅停机（清 runtime socket，BYE 手机） |
+| `ap config` | `[--edit]` | 无参数打印生效配置与路径；`--edit` 打开编辑器 |
+| `ap version` | | 版本与协议版本 |
+
+## 管道用法（Unix 哲学位）
+
+```bash
+tar czf - logs/          | ap send -        # 归档直传，不落盘
+ssh remote 'cat big.iso' | ap send -        # 远端文件借道本机进手机
+echo "手机上看这句"        | ap text          # 文本推送
+wl-paste                 | ap text          # 把当前剪贴板显式再推一次
+```
+
+`ap send` 多路径混合文件与目录；任一路径不可读 → 整体报错不入队（fail fast），已入队部分不回滚。
+
+## 配置
+
+`~/.config/airpipe/config.toml`（不存在则全自动默认）：
+
+```toml
+port = 17580            # TCP 监听 + UDP 发现端口
+device_name = "<hostname>"
+recv_dir = "~/Airpipe"  # 手机→PC 文件落盘根（from_phone/ 子目录）
+
+[clipboard]
+auto_text = true        # 文本自动同步
+auto_image = true       # 图片自动同步
+max_image_mb = 20       # 超限跳过并记日志
+```
+
+状态与身份（**不要手改**）：`~/.local/state/airpipe/{identity.pem, paired.json}`。
+运行时：`$XDG_RUNTIME_DIR/airpipe/daemon.sock`。
+
+## 系统托盘（随 daemon 常驻）
+
+图标：占位 emoji（正式图标未定）。菜单：
+
+```
+📡 Airpipe — 已连接 mi-13p        ← 状态行（离线/配对窗口中 同理）
+────────────────────
+发送剪贴板文件            ← 读当前剪贴板文件引用并入队（文件管理器复制后点这里）
+配对新设备                ← 等价 ap pair，6 位码以桌面通知弹出
+打开收件目录              ← xdg-open ~/Airpipe/from_phone
+────────────────────
+退出
+```
+
+## daemon 行为细则
+
+- 剪贴板 watcher 分类与回声抑制规则见协议文档 §9；敏感内容（密码管理器标记）永不读取。
+- 手机上线自动清空出站队列（协议 §8）。
+- 收到手机文件：落盘 → sha256 校验 → 桌面通知（名称/大小）→ 文件引用写入剪贴板（可直接 Ctrl+V）。
+- 日志：stderr（systemd 接管）；`-v` 开调试级别。
+- 单实例：socket 绑定冲突即拒绝启动并打印现有实例信息。
+
+## 实现规划（Rust，std 线程模型，无 async）
+
+```
+src/
+├── main.rs        # clap 入口与子命令分发
+├── cli.rs         # IPC 客户端侧
+├── ipc.rs         # Unix socket 服务，JSON 行协议（协议文档 §10）
+├── daemon.rs      # 主循环：TLS 监听 + 会话生命周期
+├── proto.rs       # 帧编解码（协议文档 §5）
+├── net.rs         # rustls 配置、自签证书生成（rcgen）、指纹固定验证
+├── pairing.rs     # 配对窗口与码验证
+├── discovery.rs   # UDP 应答线程（协议文档 §2）
+├── transfer.rs    # 文件收发状态机（B/D/E/R/F/X）
+├── queue.rs       # 出站引用队列（协议文档 §8）
+├── clipboard/     # ClipboardBackend trait + wayland.rs（lamco-data-control）
+├── store.rs       # identity.pem / paired.json
+├── tray.rs        # ksni 托盘
+└── config.rs
+```
+
+依赖：`clap`、`serde`/`serde_json`、`toml`、`rustls`、`rcgen`、`lamco-data-control`、`ksni`、`notify-rust`、`sha2`。全部纯 Rust 或平台常规库。
+
+## 变更日志
+
+- 2026-11-04 v1 初稿（审议中）
