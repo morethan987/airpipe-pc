@@ -3,7 +3,9 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::path::PathBuf;
+use std::process::{Command, ExitStatus};
 
 use crate::config;
 
@@ -99,4 +101,16 @@ pub fn absolutize(p: &str) -> PathBuf {
             .map(|c| c.join(&path))
             .unwrap_or(path)
     }
+}
+
+pub fn open_in_editor(path: &Path) -> std::io::Result<ExitStatus> {
+    let editor_env = std::env::var("VISUAL")
+        .or_else(|_| std::env::var("EDITOR"))
+        .unwrap_or_else(|_| "vi".into());
+
+    let mut parts = editor_env.split_whitespace();
+    let bin = parts.next().unwrap_or("vi");
+    let extra_args: Vec<&str> = parts.collect();
+
+    Command::new(bin).args(&extra_args).arg(path).status()
 }

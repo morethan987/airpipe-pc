@@ -1,10 +1,10 @@
 //! System tray (ksni / StatusNotifierItem). Icon is a generated 32x32 ARGB32
 //! placeholder pixmap until a proper icon lands.
 
-use std::sync::Arc;
-
+use ksni::blocking::TrayMethods;
 use ksni::menu::StandardItem;
-use ksni::{MenuItem, Tray, TrayService};
+use ksni::{MenuItem, Tray};
+use std::sync::Arc;
 
 use crate::daemon::Shared;
 
@@ -109,11 +109,13 @@ impl AirTray {
 }
 
 pub fn spawn(shared: Arc<Shared>) -> Result<(), String> {
-    let service = TrayService::new(AirTray {
+    let tray = AirTray {
         shared: shared.clone(),
-    });
-    let handle = service.handle();
-    *shared.tray.lock().unwrap() = Some(Box::new(move || handle.update(|_t: &mut AirTray| {})));
-    service.spawn();
+    };
+
+    // Spawns the tray service in the background and returns a handle (currently unused)
+    // for potential future UI updates. Converts spawn errors to a String and returns early.
+    let _handle = tray.spawn().map_err(|e| e.to_string())?;
+
     Ok(())
 }

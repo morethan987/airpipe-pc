@@ -3,6 +3,16 @@
 
 use std::path::{Path, PathBuf};
 
+const DEFAULT_CONFIG_TEMPLATE: &str = r#"# airpipe 配置 — 所有字段可省略
+port = 17580
+recv_dir = "~/Airpipe"
+
+[clipboard]
+auto_text = true       # 文本自动同步
+auto_image = false     # 剪贴板图片内容自动推送手机（截图/复制的图像）；复制文件不受影响
+max_image_mb = 20      # 超限跳过并记日志
+"#;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ClipboardCfg {
@@ -111,6 +121,18 @@ pub fn load() -> (Config, Option<String>) {
             Some(format!("config unreadable: {e}; using defaults")),
         ),
     }
+}
+
+/// ensure config file exists or create it
+pub fn ensure_config_file() -> std::io::Result<std::path::PathBuf> {
+    let path = config_path();
+    if !path.exists() {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&path, DEFAULT_CONFIG_TEMPLATE)?;
+    }
+    Ok(path)
 }
 
 /// Path with `~` collapsed for display.

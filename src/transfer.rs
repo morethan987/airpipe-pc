@@ -99,7 +99,11 @@ pub fn plan(paths: &[PathBuf]) -> std::io::Result<Vec<SendEntry>> {
 /// `/home/x/Airpipe/from_phone/test.pdf` sends as just `test.pdf`, and
 /// `/home/x/Airpipe/from_phone` sends as `from_phone/...`.
 fn top_name(p: &Path) -> std::io::Result<String> {
-    let name = sanitize_rel(&p.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
+    let name = sanitize_rel(
+        &p.file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default(),
+    );
     if name.is_empty() {
         return Err(std::io::Error::other(format!(
             "{}: no usable file name",
@@ -386,7 +390,10 @@ mod tests {
                 SendEntry::File { rel, .. } => rel,
             })
             .collect();
-        assert_eq!(rels, vec!["from_phone".to_string(), "from_phone/test.pdf".to_string()]);
+        assert_eq!(
+            rels,
+            vec!["from_phone".to_string(), "from_phone/test.pdf".to_string()]
+        );
 
         // relative arg with directories in it → still basename only
         let old = std::env::current_dir().unwrap();

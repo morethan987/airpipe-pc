@@ -198,11 +198,7 @@ fn handle_stdin_send<R: Read>(shared: &Arc<Shared>, w: &mut UnixStream, reader: 
         return;
     }
     let ts = crate::store::now_ts();
-    let stamp = ts
-        .get(0..19)
-        .unwrap_or("stamp")
-        .replace('-', "")
-        .replace(':', "");
+    let stamp = ts.get(0..19).unwrap_or("stamp").replace(['-', ':'], "");
     let dir = config::state_dir().join("out");
     let _ = std::fs::create_dir_all(&dir);
     let path = dir.join(format!("stdin-{stamp}.bin"));

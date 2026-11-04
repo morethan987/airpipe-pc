@@ -4,7 +4,7 @@
 
 ## 总则
 
-- 二进制名 `ap`。**无子命令运行 = `ap status`** 并附一行提示。
+- 二进制名 `ap`。**无子命令运行 = `ap help`** 。
 - 除 `ap daemon` / `ap pair` 外，所有命令经 Unix 套接字与运行中的 daemon 通信；daemon 不在 → 报错退出码 `2` 并提示先 `ap daemon`。
 - 退出码：`0` 成功；`1` 业务错误；`2` daemon 未运行；`130` Ctrl-C。
 

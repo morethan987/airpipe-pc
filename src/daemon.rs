@@ -5,7 +5,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -207,10 +207,10 @@ impl EchoGuard {
     pub fn remember(&mut self, h: u64) {
         if self.seen.insert(h) {
             self.order.push_back(h);
-            if self.order.len() > 32 {
-                if let Some(old) = self.order.pop_front() {
-                    self.seen.remove(&old);
-                }
+            if self.order.len() > 32
+                && let Some(old) = self.order.pop_front()
+            {
+                self.seen.remove(&old);
             }
         }
     }
@@ -481,10 +481,8 @@ pub fn run(cfg: Config, _verbose: bool, no_tray: bool) -> i32 {
     if let Some(clip) = &clip_backend {
         spawn_clipboard_watcher(shared.clone(), clip.clone());
     }
-    if !no_tray {
-        if let Err(e) = crate::tray::spawn(shared.clone()) {
-            alog!(Warn, "tray: {e} (continuing without)");
-        }
+    if !no_tray && let Err(e) = crate::tray::spawn(shared.clone()) {
+        alog!(Warn, "tray: {e} (continuing without)");
     }
 
     // non-blocking accept loop so `stop` is honored promptly
@@ -543,14 +541,13 @@ fn handle_conn(shared: Arc<Shared>, tcp: TcpStream, addr: SocketAddr) {
     let _ = rd.set_read_timeout(Some(Duration::from_secs(30)));
     let hs = (|| -> std::io::Result<()> {
         while state.is_handshaking() {
-            if state.wants_read() {
-                if state.read_tls(&mut rd)? == 0 {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::UnexpectedEof,
-                        "peer closed during handshake",
-                    ));
-                }
+            if state.wants_read() && state.read_tls(&mut rd)? == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "peer closed during handshake",
+                ));
             }
+
             state
                 .process_new_packets()
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -1001,10 +998,11 @@ fn spawn_pump_if_idle(shared: Arc<Shared>, conn: Arc<Conn>) {
                     let g = shared.session.lock().unwrap();
                     g.as_ref().map(|s| s.conn.clone())
                 };
-                if let Some(cur_conn) = cur {
-                    if !Arc::ptr_eq(&cur_conn, &conn) && cur_conn.alive.load(Ordering::Relaxed) {
-                        spawn_pump_if_idle(shared, cur_conn);
-                    }
+                if let Some(cur_conn) = cur
+                    && !Arc::ptr_eq(&cur_conn, &conn)
+                    && cur_conn.alive.load(Ordering::Relaxed)
+                {
+                    spawn_pump_if_idle(shared, cur_conn);
                 }
             }
         });
@@ -1123,13 +1121,13 @@ fn send_paths(
     Ok(())
 }
 
-fn top_of(paths: &[PathBuf], abs: &PathBuf) -> PathBuf {
+fn top_of(paths: &[PathBuf], abs: &Path) -> PathBuf {
     for p in paths {
         if abs.starts_with(p) {
             return p.clone();
         }
     }
-    abs.clone()
+    abs.to_path_buf()
 }
 
 /// Stream one file; on sha256 mismatch resend once, then report (§6).
@@ -1328,19 +1326,18 @@ fn on_selection(shared: &Arc<Shared>, mimes: Vec<String>) {
             if !cc.auto_text {
                 return;
             }
-            if let Some(tm) = mimes.iter().find(|m| m.starts_with("text/")) {
-                if let Ok(Some(bytes)) = clip.read(tm) {
-                    if !shared
-                        .echo
-                        .lock()
-                        .unwrap()
-                        .contains(content_hash(tm, &bytes))
-                    {
-                        shared.queue.push_clip(false, tm.clone(), bytes);
-                        return;
-                    }
-                }
+            if let Some(tm) = mimes.iter().find(|m| m.starts_with("text/"))
+                && let Ok(Some(bytes)) = clip.read(tm)
+                && !shared
+                    .echo
+                    .lock()
+                    .unwrap()
+                    .contains(content_hash(tm, &bytes))
+            {
+                shared.queue.push_clip(false, tm.clone(), bytes);
+                return;
             }
+
             alog!(
                 Info,
                 "clipboard: no syncable rendition among {mimes:?}, skipped"

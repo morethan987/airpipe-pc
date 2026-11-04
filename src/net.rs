@@ -52,7 +52,7 @@ pub fn load_or_create_identity(device_name: &str) -> Result<Identity, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let ck = rcgen::generate_simple_self_signed(vec![format!("airpipe/{device_name}")])
         .map_err(|e| format!("rcgen: {e}"))?;
-    let pem = format!("{}\n{}\n", ck.cert.pem(), ck.key_pair.serialize_pem());
+    let pem = format!("{}\n{}\n", ck.cert.pem(), ck.signing_key.serialize_pem());
     let mut f =
         std::fs::File::create(&path).map_err(|e| format!("write {}: {e}", path.display()))?;
     let _ = std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o600));
@@ -62,7 +62,7 @@ pub fn load_or_create_identity(device_name: &str) -> Result<Identity, String> {
     alog!(Info, "generated new identity, fingerprint {fingerprint}");
     Ok(Identity {
         cert: ck.cert.der().clone(),
-        key: rustls_pki_types::PrivatePkcs8KeyDer::from(ck.key_pair.serialize_der()).into(),
+        key: rustls_pki_types::PrivatePkcs8KeyDer::from(ck.signing_key.serialize_der()).into(),
         fingerprint,
     })
 }
@@ -153,11 +153,12 @@ pub fn hex(b: &[u8]) -> String {
 pub fn urandom(n: usize) -> Vec<u8> {
     use std::io::Read as _;
     let mut buf = vec![0u8; n];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        if f.read_exact(&mut buf).is_ok() {
-            return buf;
-        }
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom")
+        && f.read_exact(&mut buf).is_ok()
+    {
+        return buf;
     }
+
     // fallback: time-seeded (should never happen on Linux)
     let mut seed = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)

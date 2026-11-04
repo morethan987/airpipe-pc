@@ -55,11 +55,12 @@ mod tray;
 #[command(
     name = "ap",
     about = "Airpipe: PC ↔ phone clipboard/file pipe",
+    arg_required_else_help = true,
     version
 )]
 struct Args {
     #[command(subcommand)]
-    cmd: Option<Cmd>,
+    cmd: Cmd,
 }
 
 #[derive(Subcommand)]
@@ -116,39 +117,21 @@ enum Cmd {
 fn main() -> ExitCode {
     let args = Args::parse();
     let code = match args.cmd {
-        None | Some(Cmd::Status) => {
-            if args.cmd.is_none() {
-                println!("（无子命令 = status；`ap --help` 查看用法）");
-            }
-            cmd_status()
-        }
-        Some(Cmd::Daemon {
+        Cmd::Status => cmd_status(),
+        Cmd::Pair { timeout } => cmd_pair(timeout),
+        Cmd::Devices => cmd_devices(),
+        Cmd::Unpair { name, all } => cmd_unpair(name, all),
+        Cmd::Send { paths, clipboard } => cmd_send(&paths, clipboard),
+        Cmd::Text { text } => cmd_text(text),
+        Cmd::Log { follow } => cmd_log(follow),
+        Cmd::Stop => cmd_stop(),
+        Cmd::Config { edit } => cmd_config(edit),
+        Cmd::Daemon {
             port,
             no_tray,
             verbose,
-        }) => {
-            if verbose {
-                LOG_LEVEL.store(L_DEBUG, std::sync::atomic::Ordering::Relaxed);
-            }
-            let (mut cfg, warn) = config::load();
-            if let Some(w) = warn {
-                eprintln!("ap: {w}");
-            }
-            if let Some(p) = port {
-                cfg.port = Some(p);
-            }
-            let code = daemon::run(cfg, verbose, no_tray);
-            std::process::exit(code);
-        }
-        Some(Cmd::Pair { timeout }) => cmd_pair(timeout),
-        Some(Cmd::Devices) => cmd_devices(),
-        Some(Cmd::Unpair { name, all }) => cmd_unpair(name, all),
-        Some(Cmd::Send { paths, clipboard }) => cmd_send(&paths, clipboard),
-        Some(Cmd::Text { text }) => cmd_text(text),
-        Some(Cmd::Log { follow }) => cmd_log(follow),
-        Some(Cmd::Stop) => cmd_stop(),
-        Some(Cmd::Config { edit }) => cmd_config(edit),
-        Some(Cmd::Version) => {
+        } => cmd_daemon(port, no_tray, verbose),
+        Cmd::Version => {
             println!(
                 "ap {} (protocol v{})",
                 env!("CARGO_PKG_VERSION"),
@@ -162,9 +145,24 @@ fn main() -> ExitCode {
 
 fn ipc() -> Result<cli::Ipc, u8> {
     cli::Ipc::connect().map_err(|e| {
-        eprintln!("ap: {e}，请先运行 `ap daemon`");
+        eprintln!("ap: {e}，please run `ap daemon`.");
         2u8
     })
+}
+
+fn cmd_daemon(port: Option<u16>, no_tray: bool, verbose: bool) -> u8 {
+    if verbose {
+        LOG_LEVEL.store(L_DEBUG, std::sync::atomic::Ordering::Relaxed);
+    }
+    let (mut cfg, warn) = config::load();
+    if let Some(w) = warn {
+        eprintln!("ap: {w}");
+    }
+    if let Some(p) = port {
+        cfg.port = Some(p);
+    }
+    let code = daemon::run(cfg, verbose, no_tray);
+    std::process::exit(code);
 }
 
 fn cmd_status() -> u8 {
@@ -434,36 +432,38 @@ fn cmd_stop() -> u8 {
 }
 
 fn cmd_config(edit: bool) -> u8 {
-    if edit {
-        let editor = std::env::var("EDITOR")
-            .unwrap_or_else(|_| std::env::var("VISUAL").unwrap_or_else(|_| "vi".into()));
-        let path = config::config_path();
-        if !path.exists() {
-            if let Some(p) = path.parent() {
-                let _ = std::fs::create_dir_all(p);
-            }
-            let _ = std::fs::write(
-                &path,
-                "# airpipe 配置 — 所有字段可省略\nport = 17580\nrecv_dir = \"~/Airpipe\"\n\n[clipboard]\nauto_text = true       # 文本自动同步\nauto_image = false     # 剪贴板图片内容自动推送手机（截图/复制的图像）；复制文件不受影响\nmax_image_mb = 20      # 超限跳过并记日志\n",
-            );
-        }
-        match std::process::Command::new(editor).arg(&path).status() {
-            Ok(s) if s.success() => return 0,
-            Ok(s) => {
-                eprintln!("ap: 编辑器退出码 {:?}", s.code());
-                return 1;
-            }
-            Err(e) => {
-                eprintln!("ap: 编辑器启动失败: {e}");
-                return 1;
-            }
+    let res = if edit { edit_config() } else { show_config() };
+
+    match res {
+        Ok(()) => 0,
+        Err(err) => {
+            eprintln!("ap: {err}");
+            1
         }
     }
+}
+
+fn edit_config() -> std::io::Result<()> {
+    let path = config::ensure_config_file()?;
+    let status = cli::open_in_editor(&path)?;
+
+    if !status.success() {
+        let code = status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "signal".into());
+        return Err(std::io::Error::other(format!("编辑器非正常退出 ({code})")));
+    }
+    Ok(())
+}
+
+fn show_config() -> std::io::Result<()> {
     let (cfg, warn) = config::load();
     if let Some(w) = warn {
         eprintln!("ap: {w}");
     }
-    println!("配置文件 {}", config::display(&config::config_path()));
+
+    println!("config file {}", config::display(&config::config_path()));
     println!("port        = {}", cfg.port());
     println!("device_name = {}", cfg.device_name());
     println!("recv_dir    = {}", config::display(&cfg.recv_dir()));
@@ -471,9 +471,6 @@ fn cmd_config(edit: bool) -> u8 {
         "clipboard   auto_text={} auto_image={} max_image_mb={}",
         cfg.clipboard.auto_text, cfg.clipboard.auto_image, cfg.clipboard.max_image_mb
     );
-    println!(
-        "            （auto_image=剪贴板里的图片内容自动推送手机；复制文件永不自动发送，需托盘或 ap send -c）"
-    );
     println!("身份/状态   {}", config::display(&config::state_dir()));
-    0
+    Ok(())
 }

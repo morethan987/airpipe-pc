@@ -31,6 +31,6 @@ impl ClipboardBackend for WaylandClipboard {
     }
 
     fn on_change(&self, f: Box<dyn Fn(Vec<String>) + Send + Sync + 'static>) {
-        self.dc.on_change(move |mimes| f(mimes));
+        self.dc.on_change(f);
     }
 }
