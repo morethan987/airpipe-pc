@@ -41,6 +41,21 @@ impl Tray for AirTray {
         vec![icon_32(), icon_64()]
     }
 
+    fn watcher_online(&self) {
+        alog!(Info, "tray: registered to the StatusNotifierWatcher");
+    }
+
+    /// true = keep the service and (re)register once the watcher (the status
+    /// bar) shows up — it may start after us (boot race) or restart at any
+    /// time.
+    fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
+        alog!(
+            Warn,
+            "tray: StatusNotifierWatcher offline ({reason:?}), waiting for the bar"
+        );
+        true
+    }
+
     fn menu(&self) -> Vec<MenuItem<Self>> {
         vec![
             MenuItem::Standard(StandardItem {
@@ -106,9 +121,26 @@ pub fn spawn(shared: Arc<Shared>) -> Result<(), String> {
         shared: shared.clone(),
     };
 
-    // Spawns the tray service in the background and returns a handle (currently unused)
-    // for potential future UI updates. Converts spawn errors to a String and returns early.
-    let _handle = tray.spawn().map_err(|e| e.to_string())?;
+    // We may start before the bar registers its StatusNotifierWatcher (boot
+    // race: niri spawns the bar around the moment graphical-session.target
+    // fires). Plain spawn() fails permanently in that case, so treat a missing
+    // watcher as soft-offline and let ksni (re)register whenever it appears.
+    let handle = tray
+        .assume_sni_available(true)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    // Wire Shared::tray_refresh: re-read Tray properties and emit the update
+    // signals hosts listen for (menu status line).
+    let h = handle.clone();
+    shared
+        .tray
+        .lock()
+        .unwrap()
+        .replace(Box::new(move || match h.update(|_t: &mut AirTray| ()) {
+            Some(()) => alog!(Debug, "tray: refreshed"),
+            None => alog!(Warn, "tray: refresh skipped (service down?)"),
+        }));
 
     Ok(())
 }

@@ -1,7 +1,7 @@
 //! Bakes `assets/tray_icon.png` into 32/64 px ARGB32 (network byte order)
 //! pixmaps for the ksni tray icon. See src/tray.rs.
 
-use image::imageops::{resize, FilterType};
+use image::imageops::{FilterType, resize};
 use std::{env, fs, path::PathBuf};
 
 fn main() {
