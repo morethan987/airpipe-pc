@@ -1,8 +1,11 @@
 //! Outbound reference queue (protocol.md §8): entries hold only references
 //! (text/image bytes are small enough to carry; files are local paths),
-//! clipboard entries merge to the newest, file paths dedupe, never persisted.
+//! clipboard entries merge to the newest, never persisted. Every
+//! `push_files` call is one FIFO entry — re-sending a path must deliver
+//! another copy, so paths dedupe only within a single push, never across
+//! entries.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Condvar, Mutex};
 
@@ -41,37 +44,26 @@ impl OutQueue {
         self.cv.notify_all();
     }
 
-    /// FIFO append; paths already queued are dropped (dedup across items).
-    pub fn push_files(&self, paths: Vec<PathBuf>) {
-        let mut pushed = false;
+    /// FIFO append; duplicate paths within one push collapse (one user
+    /// action = one set), but a path already queued by an earlier push is
+    /// kept — re-sending must deliver another copy (receiver renames, §7).
+    /// Returns the number of paths actually enqueued.
+    pub fn push_files(&self, paths: Vec<PathBuf>) -> usize {
+        let mut seen: HashSet<PathBuf> = HashSet::new();
+        let fresh: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|p| seen.insert(p.clone()))
+            .collect();
+        let n = fresh.len();
+        if n == 0 {
+            return 0;
+        }
         {
             let mut q = self.items.lock().unwrap();
-            let mut existing: Vec<PathBuf> = q
-                .iter()
-                .flat_map(|i| match i {
-                    Item::Files(ps) => ps.clone(),
-                    _ => Vec::new(),
-                })
-                .collect();
-            let fresh: Vec<PathBuf> = paths
-                .into_iter()
-                .filter(|p| {
-                    if existing.contains(p) {
-                        false
-                    } else {
-                        existing.push(p.clone());
-                        true
-                    }
-                })
-                .collect();
-            if !fresh.is_empty() {
-                q.push_back(Item::Files(fresh));
-                pushed = true;
-            }
+            q.push_back(Item::Files(fresh));
         }
-        if pushed {
-            self.cv.notify_all();
-        }
+        self.cv.notify_all();
+        n
     }
 
     /// Take the whole queue for pumping (called when the phone is online).
@@ -159,29 +151,36 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_paths_dropped() {
+    fn same_push_duplicates_collapse() {
         let q = OutQueue::new();
         let a = PathBuf::from("/tmp/a.jpg");
-        q.push_files(vec![a.clone(), PathBuf::from("/tmp/b/")]);
-        q.push_files(vec![a.clone(), PathBuf::from("/tmp/c.txt")]);
+        let n = q.push_files(vec![a.clone(), a, PathBuf::from("/tmp/b/")]);
+        assert_eq!(
+            n, 2,
+            "duplicate within one push collapsed, count reflects it"
+        );
         assert_eq!(
             q.drain(),
-            vec![
-                Item::Files(vec![PathBuf::from("/tmp/a.jpg"), PathBuf::from("/tmp/b/")]),
-                Item::Files(vec![PathBuf::from("/tmp/c.txt")]),
-            ],
-            "duplicate /tmp/a.jpg dropped, new /tmp/c.txt forms its own FIFO item"
+            vec![Item::Files(vec![
+                PathBuf::from("/tmp/a.jpg"),
+                PathBuf::from("/tmp/b/")
+            ])]
         );
     }
 
     #[test]
-    fn partially_new_paths_form_new_item() {
+    fn resend_same_path_queues_again() {
+        // Regression: 5 × `ap send same.pdf` while a copy is queued or in
+        // flight must enqueue 5 entries — cross-entry dedup silently
+        // dropped re-sends (receiver renames duplicates, §7).
         let q = OutQueue::new();
-        q.push_files(vec![PathBuf::from("/f1")]);
-        q.push_files(vec![PathBuf::from("/f1"), PathBuf::from("/f2")]);
-        let d = q.drain();
-        assert_eq!(d.len(), 2);
-        assert_eq!(d[1], Item::Files(vec![PathBuf::from("/f2")]));
+        let a = PathBuf::from("/tmp/2511.pdf");
+        for _ in 0..5 {
+            assert_eq!(q.push_files(vec![a.clone()]), 1);
+        }
+        let drained = q.drain();
+        assert_eq!(drained.len(), 5);
+        assert!(drained.iter().all(|i| *i == Item::Files(vec![a.clone()])));
     }
 
     #[test]

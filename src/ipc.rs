@@ -96,9 +96,11 @@ fn handle_conn(shared: Arc<Shared>, stream: UnixStream) {
             }
             "send_clip_files" => match shared.collect_clip_files() {
                 Ok(paths) => {
-                    let n = paths.len();
-                    shared.queue.push_files(paths);
-                    let _ = reply(&mut writer, serde_json::json!({"ok": true, "queued": n}));
+                    let n = shared.queue.push_files(paths);
+                    let _ = reply(
+                        &mut writer,
+                        serde_json::json!({"ok": true, "queued": n, "online": shared.phone_online()}),
+                    );
                 }
                 Err(e) => {
                     let _ = reply(&mut writer, serde_json::json!({"ok": false, "error": e}));
@@ -185,9 +187,11 @@ fn handle_send(shared: &Arc<Shared>, w: &mut UnixStream, msg: &serde_json::Value
             return;
         }
     }
-    let n = paths.len();
-    shared.queue.push_files(paths);
-    let _ = reply(w, serde_json::json!({"ok": true, "queued": n}));
+    let n = shared.queue.push_files(paths);
+    let _ = reply(
+        w,
+        serde_json::json!({"ok": true, "queued": n, "online": shared.phone_online()}),
+    );
 }
 
 /// Two-step stdin flow: {"cmd":"send","stdin":true} → {"ok","token"} →

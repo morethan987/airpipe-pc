@@ -56,10 +56,15 @@ fn pump(shared: &Arc<Shared>, conn: &Arc<Conn>) {
                 .wait_until(Instant::now() + Duration::from_secs(1));
             continue;
         }
+        let mut it = items.into_iter();
         let mut failed: Vec<Item> = Vec::new();
-        for item in items {
+        while let Some(item) = it.next() {
             if !conn.alive.load(Ordering::Relaxed) {
+                // Link gone: this item and every drained-but-unprocessed
+                // one behind it go back to the queue (a bare `break` here
+                // used to silently drop the rest of the batch).
                 failed.push(item);
+                failed.extend(it);
                 break;
             }
             match &item {
@@ -78,12 +83,14 @@ fn pump(shared: &Arc<Shared>, conn: &Arc<Conn>) {
                     if let Err(e) = conn.send(&f) {
                         alog!(Warn, "pump clip: {e}");
                         failed.push(item);
+                        failed.extend(it);
                         break;
                     }
                 }
                 Item::Files(paths) => {
                     if let Err(remain) = send_paths(shared, conn, paths) {
                         failed.push(Item::Files(remain));
+                        failed.extend(it);
                         break;
                     }
                 }

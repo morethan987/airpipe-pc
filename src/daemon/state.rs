@@ -113,6 +113,15 @@ impl Shared {
     pub fn request_stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
+    /// True when a phone session exists and its link is still alive —
+    /// used by IPC replies so the CLI can hint accurately.
+    pub fn phone_online(&self) -> bool {
+        self.session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|s| s.conn.alive.load(Ordering::Relaxed))
+    }
     pub(super) fn next_file_id(&self) -> u32 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }

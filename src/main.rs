@@ -319,6 +319,35 @@ fn cmd_unpair(name: Option<String>, all: bool) -> u8 {
     }
 }
 
+/// Parenthetical after 「已入队 N 项」: reflects the daemon-reported phone
+/// state instead of always claiming the phone is offline.
+fn queue_hint(v: &serde_json::Value) -> String {
+    match v.get("online").and_then(|o| o.as_bool()) {
+        Some(true) => "（手机在线，正在发送）".into(),
+        Some(false) => "（手机离线，上线后自动发送）".into(),
+        None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::queue_hint;
+    use serde_json::json;
+
+    #[test]
+    fn queue_hint_reflects_online_state() {
+        assert_eq!(
+            queue_hint(&json!({"online": true})),
+            "（手机在线，正在发送）"
+        );
+        assert_eq!(
+            queue_hint(&json!({"online": false})),
+            "（手机离线，上线后自动发送）"
+        );
+        assert_eq!(queue_hint(&json!({})), "");
+    }
+}
+
 fn cmd_send(paths: &[String], clipboard: bool) -> u8 {
     if clipboard {
         if !paths.is_empty() {
@@ -329,8 +358,9 @@ fn cmd_send(paths: &[String], clipboard: bool) -> u8 {
         return match c.request(serde_json::json!({"cmd": "send_clip_files"})) {
             Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => {
                 println!(
-                    "已入队 {} 个剪贴板文件（手机上线后自动发送）",
-                    v["queued"].as_u64().unwrap_or(0)
+                    "已入队 {} 个剪贴板文件{}",
+                    v["queued"].as_u64().unwrap_or(0),
+                    queue_hint(&v)
                 );
                 0
             }
@@ -372,8 +402,9 @@ fn cmd_send(paths: &[String], clipboard: bool) -> u8 {
     match c.request(serde_json::json!({"cmd": "send", "paths": abs})) {
         Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => {
             println!(
-                "已入队 {} 项（手机上线后自动发送）",
-                v["queued"].as_u64().unwrap_or(0)
+                "已入队 {} 项{}",
+                v["queued"].as_u64().unwrap_or(0),
+                queue_hint(&v)
             );
             0
         }
