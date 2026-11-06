@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config;
-use crate::daemon::Shared;
+use crate::daemon::{ClipSend, Shared};
 
 pub fn bind_sock() -> Result<UnixListener, String> {
     let path = config::sock_path();
@@ -94,18 +94,26 @@ fn handle_conn(shared: Arc<Shared>, stream: UnixStream) {
                 );
                 let _ = reply(&mut writer, serde_json::json!({"ok": true}));
             }
-            "send_clip_files" => match shared.collect_clip_files() {
-                Ok(paths) => {
-                    let n = shared.queue.push_files(paths);
-                    let _ = reply(
-                        &mut writer,
-                        serde_json::json!({"ok": true, "queued": n, "online": shared.phone_online()}),
-                    );
-                }
-                Err(e) => {
-                    let _ = reply(&mut writer, serde_json::json!({"ok": false, "error": e}));
-                }
-            },
+            "send_clipboard" => {
+                let _ = reply(&mut writer, match shared.collect_clip_send() {
+                    Ok(ClipSend::Files(paths)) => {
+                        let n = shared.queue.push_files(paths);
+                        serde_json::json!({"ok": true, "queued": n, "online": shared.phone_online()})
+                    }
+                    Ok(ClipSend::Image { mime, data }) => {
+                        let size = data.len();
+                        shared.queue.push_clip(true, mime.clone(), data);
+                        serde_json::json!({
+                            "ok": true,
+                            "image": true,
+                            "mime": mime,
+                            "size": size,
+                            "online": shared.phone_online(),
+                        })
+                    }
+                    Err(e) => serde_json::json!({"ok": false, "error": e}),
+                });
+            }
             "pair" => handle_pair(&shared, &mut writer, &msg),
             "unpair" => handle_unpair(&shared, &mut writer, &msg),
             "stop" => {

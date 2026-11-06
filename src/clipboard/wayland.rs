@@ -24,6 +24,10 @@ impl ClipboardBackend for WaylandClipboard {
             .map_err(|e| format!("clipboard read {mime}: {e}"))
     }
 
+    fn mimes(&self) -> Vec<String> {
+        self.dc.selection_mime_types()
+    }
+
     fn set_selection(&self, mime: &str, data: Vec<u8>) -> Result<(), String> {
         self.dc
             .set_selection(Content::new().data(mime.to_owned(), data))

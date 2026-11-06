@@ -11,6 +11,13 @@ pub fn content_hash(mime: &str, data: &[u8]) -> u64 {
     hh.finish()
 }
 
+/// Clipboard image cap: the configured MiB limit, never above the protocol's
+/// CLIP_IMAGE ceiling.
+pub fn image_cap(max_image_mb: u64) -> usize {
+    (max_image_mb * 1024 * 1024)
+        .min(crate::proto::MAX_IMAGE as u64) as usize
+}
+
 /// Percent-encode a filesystem path into a `file://` URI.
 pub fn path_to_uri(p: &std::path::Path) -> String {
     let mut s = String::from("file://");

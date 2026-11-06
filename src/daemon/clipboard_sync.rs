@@ -3,10 +3,9 @@
 use std::sync::Arc;
 
 use crate::clipboard::{ClipboardBackend, classify};
-use crate::proto;
 
 use super::state::Shared;
-use super::util::{content_hash, human_size};
+use super::util::{content_hash, human_size, image_cap};
 
 pub(super) fn spawn_clipboard_watcher(shared: Arc<Shared>, clip: Arc<dyn ClipboardBackend>) {
     // The lamco callback runs on the crate's internal Wayland thread and
@@ -49,7 +48,7 @@ fn on_selection(shared: &Arc<Shared>, mimes: Vec<String>) {
             let Ok(Some(bytes)) = clip.read(&mime) else {
                 return;
             };
-            let cap = (cc.max_image_mb * 1024 * 1024).min(proto::MAX_IMAGE as u64) as usize;
+            let cap = image_cap(cc.max_image_mb);
             if bytes.len() > cap {
                 alog!(
                     Info,

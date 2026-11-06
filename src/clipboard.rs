@@ -6,6 +6,8 @@ pub mod wayland;
 pub trait ClipboardBackend: Send + Sync {
     /// Read one MIME rendition of the current selection.
     fn read(&self, mime: &str) -> Result<Option<Vec<u8>>, String>;
+    /// MIME types offered by the current selection (empty when none).
+    fn mimes(&self) -> Vec<String>;
     /// Take the selection with a single (mime, bytes) rendition.
     fn set_selection(&self, mime: &str, data: Vec<u8>) -> Result<(), String>;
     /// Register a callback fired with the offered MIME list whenever another

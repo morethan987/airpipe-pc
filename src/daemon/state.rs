@@ -16,7 +16,7 @@ use crate::queue::OutQueue;
 use crate::store::PairedDevice;
 
 use super::conn::Conn;
-use super::util::{content_hash, uri_to_path};
+use super::util::{content_hash, human_size, image_cap, uri_to_path};
 
 pub struct SessionHandle {
     pub name: Mutex<String>,
@@ -79,6 +79,16 @@ impl PinState {
     pub fn pair_window_open(&self) -> bool {
         self.pair.lock().unwrap().is_open()
     }
+}
+
+/// What an explicit clipboard send (`ap send -c` / tray) enqueues.
+#[derive(Debug)]
+pub enum ClipSend {
+    /// File references from the selection (file-manager copy).
+    Files(Vec<PathBuf>),
+    /// Raw image rendition bytes — a screenshot never exists as a file,
+    /// the clipboard only holds `image/*` bytes (see `classify`).
+    Image { mime: String, data: Vec<u8> },
 }
 
 pub struct Shared {
@@ -151,8 +161,17 @@ impl Shared {
         self.tray_refresh();
         code
     }
+    /// Explicit clipboard send (`ap send -c` / tray): file references win;
+    /// otherwise fall back to the best image rendition — a screenshot never
+    /// exists as a file, the clipboard only holds `image/*` bytes.
+    pub fn collect_clip_send(&self) -> Result<ClipSend, String> {
+        if let Ok(paths) = self.collect_clip_files() {
+            return Ok(ClipSend::Files(paths));
+        }
+        self.collect_clip_image()
+    }
     /// Read file references from the clipboard as local paths.
-    pub fn collect_clip_files(&self) -> Result<Vec<PathBuf>, String> {
+    fn collect_clip_files(&self) -> Result<Vec<PathBuf>, String> {
         let clip = self.clip.as_ref().ok_or("no clipboard backend")?;
         for mime in ["x-special/gnome-copied-files", "text/uri-list"] {
             if let Ok(Some(bytes)) = clip.read(mime) {
@@ -164,6 +183,29 @@ impl Shared {
             }
         }
         Err("No file references found in clipboard".into())
+    }
+    /// Best image rendition of the selection, size-capped like the auto-sync
+    /// path (clipboard_sync.rs).
+    fn collect_clip_image(&self) -> Result<ClipSend, String> {
+        let clip = self.clip.as_ref().ok_or("no clipboard backend")?;
+        let mimes = clip.mimes();
+        let classify::SelectionKind::Image { mime } = classify::classify(&mimes) else {
+            return Err("no file references or image in clipboard".into());
+        };
+        let data = clip
+            .read(&mime)
+            .ok()
+            .flatten()
+            .ok_or_else(|| format!("clipboard image offer {mime} unreadable"))?;
+        let cap = image_cap(self.cfg.clipboard.max_image_mb);
+        if data.len() > cap {
+            return Err(format!(
+                "clipboard image {} exceeds the {} MiB cap",
+                human_size(data.len() as u64),
+                self.cfg.clipboard.max_image_mb
+            ));
+        }
+        Ok(ClipSend::Image { mime, data })
     }
     /// Inbound T/I frame: write the PC clipboard + echo suppression.
     pub fn apply_inbound_clip(&self, mime: &str, data: Vec<u8>, is_image: bool) {

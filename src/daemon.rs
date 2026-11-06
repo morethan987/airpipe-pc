@@ -11,7 +11,7 @@ mod session;
 mod state;
 mod util;
 
-pub use state::{EchoGuard, PinState, Shared};
+pub use state::{ClipSend, EchoGuard, PinState, Shared};
 pub use util::human_size;
 
 use std::net::TcpListener;

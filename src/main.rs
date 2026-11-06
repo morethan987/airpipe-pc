@@ -90,8 +90,8 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// send files/dirs (`-` = stdin); `--clipboard` sends the files copied
-    /// in the clipboard (tray equivalent)
+    /// send files/dirs (`-` = stdin); `--clipboard` sends the clipboard
+    /// content: copied files, or images such as screenshots (tray equivalent)
     Send {
         #[arg(value_hint = clap::ValueHint::FilePath)]
         paths: Vec<String>,
@@ -355,13 +355,22 @@ fn cmd_send(paths: &[String], clipboard: bool) -> u8 {
             return 1;
         }
         let Ok(mut c) = ipc() else { return 2 };
-        return match c.request(serde_json::json!({"cmd": "send_clip_files"})) {
+        return match c.request(serde_json::json!({"cmd": "send_clipboard"})) {
             Ok(v) if v.get("ok").and_then(|o| o.as_bool()) == Some(true) => {
-                println!(
-                    "已入队 {} 个剪贴板文件{}",
-                    v["queued"].as_u64().unwrap_or(0),
-                    queue_hint(&v)
-                );
+                if v.get("image").and_then(|o| o.as_bool()) == Some(true) {
+                    println!(
+                        "已入队剪贴板图像 {}（{}）{}",
+                        v["mime"].as_str().unwrap_or("?"),
+                        daemon::human_size(v["size"].as_u64().unwrap_or(0)),
+                        queue_hint(&v)
+                    );
+                } else {
+                    println!(
+                        "已入队 {} 个剪贴板文件{}",
+                        v["queued"].as_u64().unwrap_or(0),
+                        queue_hint(&v)
+                    );
+                }
                 0
             }
             Ok(v) => {
@@ -375,7 +384,7 @@ fn cmd_send(paths: &[String], clipboard: bool) -> u8 {
         };
     }
     if paths.is_empty() {
-        eprintln!("ap: ap send <路径...>（`-` = stdin；`-c/--clipboard` = 发送剪贴板复制的文件）");
+        eprintln!("ap: ap send <路径...>（`-` = stdin；`-c/--clipboard` = 发送剪贴板内容：复制的文件或截图等图像）");
         return 1;
     }
     let Ok(mut c) = ipc() else { return 2 };

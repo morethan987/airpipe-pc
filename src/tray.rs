@@ -6,7 +6,7 @@ use ksni::menu::StandardItem;
 use ksni::{MenuItem, Tray};
 use std::sync::Arc;
 
-use crate::daemon::Shared;
+use crate::daemon::{ClipSend, Shared};
 
 pub struct AirTray {
     pub shared: Arc<Shared>,
@@ -65,12 +65,16 @@ impl Tray for AirTray {
             }),
             MenuItem::Separator,
             MenuItem::Standard(StandardItem {
-                label: "发送剪贴板文件".into(),
-                activate: Box::new(|t: &mut Self| match t.shared.collect_clip_files() {
-                    Ok(paths) => {
+                label: "发送剪贴板内容".into(),
+                activate: Box::new(|t: &mut Self| match t.shared.collect_clip_send() {
+                    Ok(ClipSend::Files(paths)) => {
                         let n = paths.len();
                         t.shared.queue.push_files(paths);
                         t.shared.notify("Airpipe", &format!("已入队 {n} 个文件"));
+                    }
+                    Ok(ClipSend::Image { mime, data }) => {
+                        t.shared.queue.push_clip(true, mime.clone(), data);
+                        t.shared.notify("Airpipe", &format!("已入队剪贴板图像（{mime}）"));
                     }
                     Err(e) => t.shared.notify("Airpipe", &e),
                 }),
