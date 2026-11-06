@@ -350,6 +350,9 @@ fn reader_loop(
                 // answer for one of OUR outbound transfers
                 conn.deposit_result(id, (status, sha256));
             }
+            // Batch framing is PC→phone only today; a phone never sends
+            // it, ignore defensively.
+            Frame::BatchBegin { .. } => {}
             Frame::Cancel { id } => {
                 if let Some(mut ib) = inbound.remove(&id) {
                     ib.abort();

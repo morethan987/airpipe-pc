@@ -60,6 +60,13 @@ pub enum Frame {
     FileEnd {
         id: u32,
     },
+    /// Batch begin (§6): one user send action; announces the batch totals
+    /// so the receiver aggregates progress and reports one event.
+    BatchBegin {
+        items: u32,
+        files: u32,
+        bytes: u64,
+    },
     FileProgress {
         id: u32,
         bytes: u64,
@@ -188,6 +195,7 @@ impl Frame {
             Frame::PairRequest { .. } => b'Q',
             Frame::PairAccept { .. } => b'A',
             Frame::Bye { .. } => b'Y',
+            Frame::BatchBegin { .. } => b'G',
         }
     }
 
@@ -249,6 +257,15 @@ impl Frame {
             Frame::Bye { reason } => {
                 p.push(reason.len().clamp(0, 255) as u8);
                 p.extend_from_slice(reason.as_bytes());
+            }
+            Frame::BatchBegin {
+                items,
+                files,
+                bytes,
+            } => {
+                put_u32(&mut p, *items);
+                put_u32(&mut p, *files);
+                put_u64(&mut p, *bytes);
             }
         }
         p
@@ -330,6 +347,16 @@ impl Frame {
             b'X' => Frame::Cancel {
                 id: get_u32(p, &mut o)?,
             },
+            b'G' => {
+                let items = get_u32(p, &mut o)?;
+                let files = get_u32(p, &mut o)?;
+                let bytes = get_u64(p, &mut o)?;
+                Frame::BatchBegin {
+                    items,
+                    files,
+                    bytes,
+                }
+            }
             b'Q' => {
                 let n = get_bytes(p, &mut o, 1)?[0] as usize;
                 let code = get_str(p, &mut o, n)?;
@@ -429,6 +456,11 @@ mod tests {
             sha256: [7; 32],
         });
         rt(Frame::Cancel { id: 7 });
+        rt(Frame::BatchBegin {
+            items: 3,
+            files: 17,
+            bytes: 47_244_640_256,
+        });
         rt(Frame::PairRequest {
             code: "483920".into(),
             name: "mi-13p".into(),

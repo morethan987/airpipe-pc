@@ -385,6 +385,10 @@ impl Default for ChunkDecoder {
 mod tests {
     use super::*;
 
+    /// plan() 的两个用例会 set_current_dir（进程全局），并行测试互踩
+    /// 会导致偶发 NotFound——用锁串行化。
+    static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn sanitize_strips_and_drops() {
         assert_eq!(sanitize_rel("/a/b/c.txt"), "a/b/c.txt");
@@ -501,6 +505,7 @@ mod tests {
 
     #[test]
     fn plan_walks_sorted_with_dir_skeleton() {
+        let _cwd = CWD_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("airpipe-plan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("d/sub")).unwrap();
@@ -535,6 +540,7 @@ mod tests {
 
     #[test]
     fn plan_uses_top_level_names_only() {
+        let _cwd = CWD_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join(format!("airpipe-top-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Airpipe/from_phone")).unwrap();

@@ -152,6 +152,29 @@ fn send_paths(
             .cloned()
             .collect()
     };
+    // One user action = one batch (§6): G announces the totals so the
+    // phone aggregates progress and reports a single completion event.
+    // Dir-only batches skip G (no F frames follow; the receiver treats
+    // bare directory B frames as their own event).
+    let files = entries
+        .iter()
+        .filter(|e| matches!(e, SendEntry::File { .. }))
+        .count();
+    if files > 0 {
+        let bytes = entries
+            .iter()
+            .filter_map(|e| match e {
+                SendEntry::File { size, .. } => Some(*size),
+                _ => None,
+            })
+            .sum::<u64>();
+        conn.send(&Frame::BatchBegin {
+            items: paths.len() as u32,
+            files: files as u32,
+            bytes,
+        })
+        .map_err(|_| remaining(&sent_tops))?;
+    }
     let mut entries = entries.into_iter().peekable();
     let mut inflight: Vec<Inflight> = Vec::new();
     loop {
