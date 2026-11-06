@@ -11,6 +11,10 @@ recv_dir = "~/Airpipe"
 auto_text = true       # 文本自动同步
 auto_image = false     # 剪贴板图片内容自动推送手机（截图/复制的图像）；复制文件不受影响
 max_image_mb = 20      # 超限跳过并记日志
+
+[transfer]
+window = 4             # 同时在途的文件数（1 = 逐文件等待结果，v1 行为；WLAN 小文件场景 4 有 ~2× 实测收益）
+compression = "auto"   # auto = 按扩展名（媒体/压缩包跳过） / always / never
 "#;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -33,6 +37,35 @@ impl Default for ClipboardCfg {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct TransferCfg {
+    /// Outbound files allowed in flight before waiting for FILE_RESULT.
+    /// 1 reproduces v1 stop-and-wait. Clamped to 1..=8.
+    pub window: u8,
+    /// "auto" | "always" | "never", resolved into crate::transfer::CompMode.
+    pub compression: String,
+}
+
+impl Default for TransferCfg {
+    fn default() -> Self {
+        Self {
+            window: 4,
+            compression: "auto".into(),
+        }
+    }
+}
+
+impl TransferCfg {
+    pub fn window(&self) -> usize {
+        self.window.clamp(1, 8) as usize
+    }
+    pub fn comp_mode(&self) -> crate::transfer::CompMode {
+        crate::transfer::CompMode::parse(&self.compression)
+            .unwrap_or(crate::transfer::CompMode::Auto)
+    }
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -40,6 +73,7 @@ pub struct Config {
     pub device_name: Option<String>,
     pub recv_dir: Option<String>,
     pub clipboard: ClipboardCfg,
+    pub transfer: TransferCfg,
 }
 
 impl Config {

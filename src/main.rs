@@ -1,8 +1,9 @@
 //! `ap` — Airpipe PC CLI + daemon entry point.
 
-use std::process::ExitCode;
+use std::{io, process::ExitCode};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{Shell, generate};
 
 // ------------------------------------------------------------------ log ----
 
@@ -92,6 +93,7 @@ enum Cmd {
     /// send files/dirs (`-` = stdin); `--clipboard` sends the files copied
     /// in the clipboard (tray equivalent)
     Send {
+        #[arg(value_hint = clap::ValueHint::FilePath)]
         paths: Vec<String>,
         #[arg(short, long)]
         clipboard: bool,
@@ -112,6 +114,11 @@ enum Cmd {
     },
     /// version info
     Version,
+    /// Generate shell completion scripts
+    Completions {
+        #[arg(value_enum)]
+        shell: Shell,
+    },
 }
 
 fn main() -> ExitCode {
@@ -126,6 +133,7 @@ fn main() -> ExitCode {
         Cmd::Log { follow } => cmd_log(follow),
         Cmd::Stop => cmd_stop(),
         Cmd::Config { edit } => cmd_config(edit),
+        Cmd::Completions { shell } => cmd_completions(shell),
         Cmd::Daemon {
             port,
             no_tray,
@@ -141,6 +149,12 @@ fn main() -> ExitCode {
         }
     };
     ExitCode::from(code)
+}
+
+fn cmd_completions(shell: Shell) -> u8 {
+    let mut cmd = Args::command();
+    generate(shell, &mut cmd, "ap", &mut io::stdout());
+    0
 }
 
 fn ipc() -> Result<cli::Ipc, u8> {

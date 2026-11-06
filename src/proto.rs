@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-pub const PROTO_VER: u16 = 1;
+pub const PROTO_VER: u16 = 2;
 pub const TCP_PORT: u16 = 17580;
 pub const CHUNK: usize = 131_072;
 pub const MAX_TEXT: usize = 4 * 1024 * 1024;
@@ -24,6 +24,9 @@ pub const CAP_FILES: u32 = 4;
 /// FILE_BEGIN flags.
 pub const BF_SIZE_UNKNOWN: u8 = 1;
 pub const BF_DIR: u8 = 2;
+
+/// FILE_DATA flags (v2): bit0 = chunk is zstd-compressed.
+pub const DF_ZSTD: u8 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Frame {
@@ -50,6 +53,8 @@ pub enum Frame {
     },
     FileData {
         id: u32,
+        /// payload flag bit0: the chunk body is zstd-compressed (v2)
+        zstd: bool,
         data: Vec<u8>,
     },
     FileEnd {
@@ -214,8 +219,9 @@ impl Frame {
                 p.extend_from_slice(&rel_path.as_bytes()[..n]);
                 put_u64(&mut p, *size);
             }
-            Frame::FileData { id, data } => {
+            Frame::FileData { id, zstd, data } => {
                 put_u32(&mut p, *id);
+                p.push(if *zstd { DF_ZSTD } else { 0 });
                 p.extend_from_slice(data);
             }
             Frame::FileEnd { id } | Frame::Cancel { id } => {
@@ -295,9 +301,17 @@ impl Frame {
             }
             b'D' => {
                 let id = get_u32(p, &mut o)?;
+                let flags = get_bytes(p, &mut o, 1)?[0];
+                if flags & !DF_ZSTD != 0 {
+                    return Err(FrameError::Malformed("unknown FILE_DATA flags"));
+                }
                 let rest = p.len() - o;
                 let data = get_bytes(p, &mut o, rest)?.to_vec();
-                Frame::FileData { id, data }
+                Frame::FileData {
+                    id,
+                    zstd: flags & DF_ZSTD != 0,
+                    data,
+                }
             }
             b'E' => Frame::FileEnd {
                 id: get_u32(p, &mut o)?,
@@ -396,7 +410,13 @@ mod tests {
         });
         rt(Frame::FileData {
             id: 42,
+            zstd: false,
             data: vec![9; CHUNK],
+        });
+        rt(Frame::FileData {
+            id: 43,
+            zstd: true,
+            data: vec![1, 2, 3],
         });
         rt(Frame::FileEnd { id: 42 });
         rt(Frame::FileProgress {

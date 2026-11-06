@@ -253,6 +253,134 @@ impl FileChunks {
     }
 }
 
+// -------------------------------------------------------------- compression
+// (protocol v2, transfer-perf.md §3.4/§6): per-chunk zstd level 1, chosen
+// because the wire (1.3–4.2 MB/s WLAN / 36 MB/s USB) is two orders of
+// magnitude slower than both codecs, so ratio is the only thing that moves
+// end-to-end time.
+
+/// Compression policy from `[transfer] compression`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompMode {
+    /// zstd everything except known-compressed extensions.
+    Auto,
+    /// zstd everything (per-chunk fallback keeps incompressible data raw).
+    Always,
+    /// v1 behavior: never compress.
+    Never,
+}
+
+impl CompMode {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "always" => Some(Self::Always),
+            "never" => Some(Self::Never),
+            _ => None,
+        }
+    }
+}
+
+/// Extensions whose payloads are already entropy-coded; zstd on them is
+/// pure CPU burn (measured ratio 1.000). Lowercase compare.
+const INCOMPRESSIBLE: &[&str] = &[
+    // archives
+    "zip", "rar", "7z", "gz", "xz", "zst", "bz2", "br", "lz4", "sz", "tgz", "tbz2", "txz", "crx",
+    // images
+    "png", "jpg", "jpeg", "webp", "gif", "heic", "heif", "avif", "jxl", // video
+    "mp4", "mov", "mkv", "webm", "avi", "m4v", "3gp", "mpeg", "mpg", "ts", "flv", "wmv",
+    // audio
+    "mp3", "m4a", "aac", "flac", "ogg", "opus", "wma", "ape", "mka",
+    // apps / packages (zip-based containers included)
+    "apk", "aab", "jar", "dex", "docx", "xlsx", "pptx", "epub", "cbz", "iso", "dmg", "deb", "rpm",
+];
+
+/// Whether outbound `name` should be compressed under `mode`.
+#[must_use]
+pub fn should_compress(name: &str, mode: CompMode) -> bool {
+    match mode {
+        CompMode::Never => false,
+        CompMode::Always => true,
+        CompMode::Auto => {
+            let ext = name.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+            match ext {
+                Some(e) => !INCOMPRESSIBLE.contains(&e.as_str()),
+                None => true,
+            }
+        }
+    }
+}
+
+/// Per-file zstd compressor for outbound chunks. Chunks are compressed
+/// independently (random access, D-frame boundaries); one context is
+/// reused across the file's chunks.
+pub struct ChunkEncoder {
+    c: Option<zstd::bulk::Compressor<'static>>,
+}
+
+impl ChunkEncoder {
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            c: if enabled {
+                zstd::bulk::Compressor::new(1).ok()
+            } else {
+                None
+            },
+        }
+    }
+
+    /// Compress `chunk` into `zbuf` if that is strictly smaller; returns
+    /// (was_compressed, wire_bytes). Never copies in the raw fallback.
+    pub fn encode<'a>(&mut self, chunk: &'a [u8], zbuf: &'a mut Vec<u8>) -> (bool, &'a [u8]) {
+        let Some(c) = self.c.as_mut() else {
+            return (false, chunk);
+        };
+        zbuf.clear();
+        // covers zstd's worst-case bound (src + src/256 + 64) for any chunk
+        let bound = chunk.len() + chunk.len() / 64 + 1024;
+        if zbuf.capacity() < bound {
+            zbuf.reserve(bound - zbuf.capacity());
+        }
+        match c.compress_to_buffer(chunk, zbuf) {
+            Ok(n) if n < chunk.len() => (true, &zbuf[..n]),
+            _ => (false, chunk),
+        }
+    }
+}
+
+/// Reusable zstd decompressor for inbound chunks. Output is bounded by
+/// CHUNK (the sender never compresses a chunk larger than that).
+pub struct ChunkDecoder {
+    d: zstd::bulk::Decompressor<'static>,
+    pub buf: Vec<u8>,
+}
+
+impl ChunkDecoder {
+    pub fn new() -> Self {
+        Self {
+            d: zstd::bulk::Decompressor::new().expect("zstd context"),
+            buf: vec![0; crate::proto::CHUNK],
+        }
+    }
+
+    /// Decompress a zstd D-frame body. Errors (bad frame, oversize output)
+    /// surface as io errors so the existing inbound-abort path handles them.
+    pub fn decode(&mut self, z: &[u8]) -> std::io::Result<&[u8]> {
+        self.buf.clear();
+        let n = self
+            .d
+            .decompress_to_buffer(z, &mut self.buf)
+            .map_err(|e| std::io::Error::other(format!("zstd: {e}")))?;
+        Ok(&self.buf[..n])
+    }
+}
+
+impl Default for ChunkDecoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +409,51 @@ mod tests {
         std::fs::write(&noext, b"3").unwrap();
         assert_eq!(unique_path(&noext), dir.join("data (1)"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn compress_policy_by_extension_and_mode() {
+        assert!(should_compress("notes.txt", CompMode::Auto));
+        assert!(should_compress("noext", CompMode::Auto));
+        assert!(!should_compress("photo.PNG", CompMode::Auto));
+        assert!(!should_compress("a.tar.zst", CompMode::Auto));
+        assert!(!should_compress("video.mp4", CompMode::Never));
+        assert!(should_compress("video.mp4", CompMode::Always));
+        assert_eq!(CompMode::parse(" Auto "), Some(CompMode::Auto));
+        assert_eq!(CompMode::parse("bogus"), None);
+    }
+
+    #[test]
+    fn chunk_codec_roundtrip_and_fallback() {
+        let mut enc = ChunkEncoder::new(true);
+        let mut dec = ChunkDecoder::new();
+        let mut zbuf = Vec::new();
+        // compressible chunk → zstd wins
+        let text: Vec<u8> = "airpipe ".repeat(16 * 1024).into_bytes();
+        let (z, wire) = enc.encode(&text, &mut zbuf);
+        assert!(z);
+        assert!(wire.len() < text.len());
+        assert_eq!(dec.decode(wire).unwrap(), &text[..]);
+        // incompressible chunk → raw fallback, no copy
+        let mut rs = 0x9e3779b9u32;
+        let rnd: Vec<u8> = (0..crate::proto::CHUNK)
+            .map(|_| {
+                rs ^= rs << 13;
+                rs ^= rs >> 17;
+                rs ^= rs << 5;
+                rs as u8
+            })
+            .collect();
+        let (z, wire) = enc.encode(&rnd, &mut zbuf);
+        assert!(!z);
+        assert!(std::ptr::eq(wire.as_ptr(), rnd.as_ptr()));
+        // disabled encoder is a passthrough
+        let mut off = ChunkEncoder::new(false);
+        let (z, wire) = off.encode(&text, &mut zbuf);
+        assert!(!z);
+        assert!(std::ptr::eq(wire.as_ptr(), text.as_ptr()));
+        // oversize/garbage input is an error, not a panic
+        assert!(dec.decode(b"not-a-zstd-frame").is_err());
     }
 
     #[test]
@@ -405,5 +578,74 @@ mod tests {
         // args without a usable file name fail fast
         assert!(plan(&[dir.join("..")]).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod wire_chain {
+    use super::*;
+    use crate::proto::Frame;
+    use sha2::{Digest, Sha256};
+
+    /// 全链路往返：FileChunks → ChunkEncoder → Frame 编码/解码 → ChunkDecoder → sha。
+    /// 不可压语料走 raw 回退路径，防 D 帧头/落盘偏移类回归（真机曾因偏移翻车）。
+    #[test]
+    fn full_wire_chain_incompressible() {
+        let dir = std::env::temp_dir().join("ap-wire-tmp");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("r.bin");
+        let mut rs = 0x12345678u32;
+        let body: Vec<u8> = (0..300_000)
+            .map(|_| {
+                rs ^= rs << 13;
+                rs ^= rs >> 17;
+                rs ^= rs << 5;
+                rs as u8
+            })
+            .collect();
+        std::fs::write(&p, &body).unwrap();
+        let mut expect = Sha256::new();
+        expect.update(&body);
+
+        let mut fc = FileChunks::open(&p).unwrap();
+        let mut enc = ChunkEncoder::new(true);
+        let mut dec = ChunkDecoder::new();
+        let mut got = Sha256::new();
+        let mut raw = Vec::new();
+        let mut zbuf = Vec::new();
+        let mut n_zstd = 0;
+        let mut n_raw = 0;
+        while let Some(chunk) = fc.next(&mut raw).unwrap() {
+            let (z, wire) = enc.encode(chunk, &mut zbuf);
+            if z {
+                n_zstd += 1
+            } else {
+                n_raw += 1
+            }
+            let frame = Frame::FileData {
+                id: 1,
+                zstd: z,
+                data: wire.to_vec(),
+            };
+            // 全帧编码（帧头+载荷）再解码，模拟线上往返
+            let buf = frame.encode();
+            let hdr = crate::proto::Frame::decode(b'D', &buf[5..]).unwrap();
+            match hdr {
+                Frame::FileData { data, zstd, .. } => {
+                    let plain = if zstd {
+                        dec.decode(&data).unwrap()
+                    } else {
+                        &data
+                    };
+                    got.update(plain);
+                }
+                _ => panic!("wrong frame"),
+            }
+        }
+        println!("zstd chunks={n_zstd} raw chunks={n_raw}");
+        let g: [u8; 32] = got.finalize().into();
+        let e: [u8; 32] = expect.finalize().into();
+        assert_eq!(g, e);
+        std::fs::remove_file(&p).unwrap();
     }
 }

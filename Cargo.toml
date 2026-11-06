@@ -1,6 +1,6 @@
 [package]
 name = "airpipe-pc"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 description = "Airpipe PC daemon and CLI (LAN clipboard/file transfer)"
 
@@ -27,6 +27,8 @@ rcgen = { version = "0.14.10", default-features = false, features = [
     "pem",
     "ring",
 ] }
+zstd = "0.14.3"
+clap_complete = "4.6.11"
 
 [build-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

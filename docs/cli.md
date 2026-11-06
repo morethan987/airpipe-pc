@@ -22,7 +22,24 @@
 | `ap log` | `[-f/--follow]` | 跟随 daemon 日志；systemd 下即 `journalctl --user -u airpipe -f` |
 | `ap stop` | | 优雅停机（清 runtime socket，BYE 手机） |
 | `ap config` | `[--edit]` | 无参数打印生效配置与路径；`--edit` 打开编辑器 |
+| `ap completions` | `<shell>` | 导出终端 shell 自动补全脚本 |
 | `ap version` | | 版本与协议版本 |
+
+命令自动补全脚本配置方式：
+
+```sh
+# Bash
+source <(ap completions bash)
+
+# Zsh
+ap completions zsh > ~/.zsh/completions/_ap
+
+# Fish
+ap completions fish > ~/.config/fish/completions/ap.fish
+
+# Elvish
+ap completions elvish > ~/.config/elvish/lib/ap.elv
+```
 
 ## 管道用法（Unix 哲学位）
 
@@ -48,7 +65,12 @@ recv_dir = "~/Airpipe"  # 手机→PC 文件落盘根（from_phone/ 子目录）
 auto_text = true        # 文本自动同步
 auto_image = false      # 剪贴板图片内容（截图/复制的图像）自动推送手机；复制文件不受影响
 max_image_mb = 20       # 超限跳过并记日志
-```
+
+[transfer]
+window = 4              # 文件级流水线窗口（协议 §6）：E 已发 F 未回的文件数，1..8；
+                        # 1 = v1 停等（回归开关）；小文件批量时 4 约省一半时间
+compression = "auto"    # 传输压缩：auto = 按扩展名跳过已压格式（zip/png/mp4/…）|
+                        # always = 一律压 | never = 一律不压（回归开关）
 
 状态与身份（**不要手改**）：`~/.local/state/airpipe/{identity.pem, paired.json}`。
 运行时：`$XDG_RUNTIME_DIR/airpipe/daemon.sock`。
@@ -82,12 +104,12 @@ src/
 ├── main.rs        # clap 入口与子命令分发
 ├── cli.rs         # IPC 客户端侧
 ├── ipc.rs         # Unix socket 服务，JSON 行协议（协议文档 §10）
-├── daemon.rs      # 主循环：TLS 监听 + 会话生命周期
+├── daemon.rs      # daemon 入口 + daemon/ 按职责拆分（conn/state/session/file_transfer/clipboard_sync/util）
 ├── proto.rs       # 帧编解码（协议文档 §5）
 ├── net.rs         # rustls 配置、自签证书生成（rcgen）、指纹固定验证
 ├── pairing.rs     # 配对窗口与码验证
 ├── discovery.rs   # UDP 应答线程（协议文档 §2）
-├── transfer.rs    # 文件收发状态机（B/D/E/R/F/X）
+├── transfer.rs    # 文件收发状态机（B/D/E/R/F/X）+ 分块压缩（ChunkEncoder/ChunkDecoder/CompMode）
 ├── queue.rs       # 出站引用队列（协议文档 §8）
 ├── clipboard/     # ClipboardBackend trait + wayland.rs（lamco-data-control）
 ├── store.rs       # identity.pem / paired.json
@@ -95,9 +117,10 @@ src/
 └── config.rs
 ```
 
-依赖：`clap`、`serde`/`serde_json`、`toml`、`rustls`、`rcgen`、`lamco-data-control`、`ksni`、`notify-rust`、`sha2`。全部纯 Rust 或平台常规库。
+依赖：`clap`、`serde`/`serde_json`、`toml`、`rustls`、`rcgen`、`lamco-data-control`、`ksni`、`notify-rust`、`sha2`、`zstd`。全部纯 Rust 或平台常规库。
 
 ## 变更日志
 
 - 2026-11-04 v1 初稿（审议中）
 - 2026-11-04 v1.1：`ap send` 顶层命名只取参数自身文件名/目录名（单文件不再带父目录）；新增 `ap send -c/--clipboard`（等同托盘「发送剪贴板文件」）；`auto_image` 默认 false 并在 `ap config` 输出中释义。
+- 2026-11-06 v1.2：新增 `[transfer]` 配置（`window` 1..8 默认 4、`compression` auto/always/never）；daemon.rs 拆分为 `daemon/` 模块目录；协议 v2（D 帧压缩 + 流水线窗口）；新增静态命令自动补全功能
