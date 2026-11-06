@@ -126,6 +126,35 @@ pub(super) fn handle_conn(shared: Arc<Shared>, tcp: TcpStream, addr: SocketAddr)
     }
 }
 
+/// 入站批聚合状态（协议 §6）：`G` 帧划界一次用户发送动作，
+/// 批收尾发一条桌面通知 + 写一次剪贴板，替代逐文件通知。
+struct InboundBatch {
+    /// `G.files`；0 = 隐式批（无 G 的 B 流，在途清空即收尾）
+    files: u32,
+    done: u32,
+    ok: u32,
+    bytes: u64,
+    paths: Vec<PathBuf>,
+}
+
+/// 批收尾通知：单文件保持「name (size)」样式；多文件「N 个文件 · size」。
+fn notify_inbound_batch(shared: &Arc<Shared>, b: &InboundBatch) {
+    if b.paths.is_empty() {
+        return; // 全失败：逐文件 warn 日志已足够
+    }
+    let body = if b.paths.len() == 1 {
+        let name = b.paths[0]
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        format!("{name} ({})", human_size(b.bytes))
+    } else {
+        format!("{} 个文件 · {}", b.paths.len(), human_size(b.bytes))
+    };
+    shared.notify("Airpipe 收到文件", &body);
+    write_received_files_clip(shared, &b.paths);
+}
+
 fn reader_loop(
     shared: &Arc<Shared>,
     conn: &Arc<Conn>,
@@ -134,6 +163,31 @@ fn reader_loop(
 ) -> Result<(), FrameError> {
     let mut inbound: HashMap<u32, Inbound> = HashMap::new();
     let mut zdec = transfer::ChunkDecoder::new();
+    // 入站批聚合（协议 §6）：入站文件终态记账 done/ok/bytes/paths，
+    // 批满足收尾条件（显式批计数齐 / 隐式批在途清空）时一条通知 + 一次剪贴板写入。
+    let mut batch: Option<InboundBatch> = None;
+    macro_rules! file_done {
+        ($ok:expr, $size:expr, $path:expr) => {{
+            if let Some(b) = batch.as_mut() {
+                b.done += 1;
+                if $ok {
+                    b.ok += 1;
+                    b.bytes += $size;
+                    if let Some(p) = $path {
+                        b.paths.push(p);
+                    }
+                }
+            }
+            if batch
+                .as_ref()
+                .is_some_and(|b| (b.files == 0 || b.done >= b.files) && inbound.is_empty())
+            {
+                if let Some(b) = batch.take() {
+                    notify_inbound_batch(shared, &b);
+                }
+            }
+        }};
+    }
 
     // Feeder thread: owns the blocking socket read and the TLS record
     // plumbing, handing complete frames over a channel. Blocking reads no
@@ -235,6 +289,7 @@ fn reader_loop(
                         status: 2,
                         sha256: [0; 32],
                     })?;
+                    file_done!(false, 0, None); // B 被拒即该文件终态
                     continue;
                 }
                 let root = shared.cfg.inbound_dir();
@@ -257,6 +312,16 @@ fn reader_loop(
                         Ok(ib) => {
                             alog!(Info, "recv {}", ib.final_path.display());
                             inbound.insert(id, ib);
+                            if batch.is_none() {
+                                // 无 G 的 B 流（旧对端/重传孤儿）：隐式批，在途清空收尾
+                                batch = Some(InboundBatch {
+                                    files: 0,
+                                    done: 0,
+                                    ok: 0,
+                                    bytes: 0,
+                                    paths: vec![],
+                                });
+                            }
                         }
                         Err(e) => {
                             alog!(Warn, "create part file: {e}");
@@ -265,6 +330,7 @@ fn reader_loop(
                                 status: 2,
                                 sha256: [0; 32],
                             })?;
+                            file_done!(false, 0, None);
                         }
                     }
                 }
@@ -305,6 +371,7 @@ fn reader_loop(
                                 status: 2,
                                 sha256: [0; 32],
                             })?;
+                            file_done!(false, 0, None);
                         }
                     }
                 }
@@ -325,11 +392,7 @@ fn reader_loop(
                                 .map(|n| n.to_string_lossy().into_owned())
                                 .unwrap_or_default();
                             alog!(Info, "done {fname} ({})", human_size(size));
-                            shared.notify(
-                                "Airpipe 收到文件",
-                                &format!("{fname} ({})", human_size(size)),
-                            );
-                            write_received_files_clip(shared, &[path]);
+                            file_done!(true, size, Some(path));
                         }
                         Err(e) => {
                             alog!(Warn, "finalize: {e}");
@@ -339,6 +402,7 @@ fn reader_loop(
                                 status: 2,
                                 sha256: [0; 32],
                             })?;
+                            file_done!(false, 0, None);
                         }
                     }
                 }
@@ -350,12 +414,23 @@ fn reader_loop(
                 // answer for one of OUR outbound transfers
                 conn.deposit_result(id, (status, sha256));
             }
-            // Batch framing is PC→phone only today; a phone never sends
-            // it, ignore defensively.
-            Frame::BatchBegin { .. } => {}
+            Frame::BatchBegin { files, .. } => {
+                // 新批顶替未收尾旧批（对端断线重排后重发）：已落盘部分立即结算
+                if let Some(old) = batch.take() {
+                    notify_inbound_batch(shared, &old);
+                }
+                batch = Some(InboundBatch {
+                    files,
+                    done: 0,
+                    ok: 0,
+                    bytes: 0,
+                    paths: vec![],
+                });
+            }
             Frame::Cancel { id } => {
                 if let Some(mut ib) = inbound.remove(&id) {
                     ib.abort();
+                    file_done!(false, 0, None);
                 }
                 conn.deposit_result(id, (3, [0; 32]));
             }
